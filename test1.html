@@ -1380,6 +1380,8 @@ $("pasteSave").onclick=()=>{
 
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 let rec=null,listening=false,finalText="",interim="",timerInt=null,seconds=0;
+/* Счётчик уже учтённых финальных результатов — ключ к отсутствию дублей. */
+let finalizedCount=0;
 let audioCtx=null,analyser=null,mediaStream=null,rafId=null;
 function fmtT(s){return Math.floor(s/60)+":"+String(s%60).padStart(2,"0");}
 function updWC(){$("wc").textContent=wc(tx.value);updateReady();}
@@ -1409,16 +1411,44 @@ async function startRec(){
     else showVoiceWarn("Не удалось включить микрофон: "+(e&&e.name?e.name:"ошибка")+".");
   }
   rec=new SR();rec.lang="ru-RU";rec.continuous=true;rec.interimResults=true;rec.maxAlternatives=1;
-  rec.onresult=e=>{interim="";
-    for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];
-      if(r.isFinal)finalText=(finalText+" "+r[0].transcript).replace(/\s+/g," ").trim();else interim+=r[0].transcript;}
-    tx.value=(finalText+" "+interim).trim();updWC();};
+
+  /* ГЛАВНОЕ ИСПРАВЛЕНИЕ: обрабатываем все results с нуля, но добавляем
+     в finalText только те финалы, которые ещё не учтены (i >= finalizedCount).
+     Это исключает повторное добавление старых результатов, когда браузер
+     присылает resultIndex = 0 при уже обработанных финалах. */
+  rec.onresult=e=>{
+    interim="";
+    for(let i=0;i<e.results.length;i++){
+      const r=e.results[i];
+      if(r.isFinal){
+        if(i>=finalizedCount){
+          const add=r[0]&&r[0].transcript?r[0].transcript:"";
+          finalText=(finalText+" "+add).replace(/\s+/g," ").trim();
+          finalizedCount=i+1;
+        }
+      }else{
+        interim+=(r[0]&&r[0].transcript)?r[0].transcript:"";
+      }
+    }
+    tx.value=((finalText+" "+interim).replace(/\s+/g," ")).trim();
+    updWC();
+  };
+
   rec.onerror=e=>{
     if(e.error==="not-allowed"||e.error==="service-not-allowed")showVoiceWarn("Доступ к микрофону запрещён в настройках браузера.");
     else if(e.error==="network")showVoiceWarn("Распознавание речи требует интернет. Проверь соединение.");
     else if(e.error==="no-speech")showVoiceWarn("Не слышно речи. Говори ближе к микрофону и нажми кнопку снова.");
+    /* Ничего не сбрасываем: сказанное ранее должно сохраниться. */
   };
-  rec.onend=()=>{if(listening){try{rec.start();}catch(e){}}};
+
+  /* Перезапуск с паузой — иначе Android иногда открывает две сессии подряд,
+     что и даёт двойные события. */
+  rec.onend=()=>{
+    if(listening){
+      setTimeout(()=>{if(listening){try{rec.start();}catch(e){}}},250);
+    }
+  };
+
   try{rec.start();}catch(e){}
   listening=true;micBtn.classList.add("rec");micBtn.textContent="⏹";
   micStatus.textContent="Слушаю… говори спокойно, я записываю";micStatus.classList.add("live");
@@ -1433,6 +1463,8 @@ function stopRec(){
   if(mediaStream)mediaStream.getTracks().forEach(t=>t.stop());
   if(audioCtx){audioCtx.close();audioCtx=null;}
   const c=$("wave");c.getContext("2d").clearRect(0,0,c.width,c.height);
+  /* Счётчик сбрасываем, чтобы следующий сеанс записи начинался корректно. */
+  finalizedCount=0;
 }
 (function micEnv(){
   const env=document.createElement("div");env.className="hint";env.style.marginTop="10px";env.style.textAlign="center";
@@ -1446,7 +1478,12 @@ function stopRec(){
 })();
 if(!SR){micBtn.style.opacity=".55";}
 micBtn.onclick=()=>{if(!SR){showVoiceWarn("Голосовой ввод недоступен в этом браузере — напиши пересказ текстом.");return;} listening?stopRec():startRec();};
-$("clearBtn").onclick=()=>{tx.value="";finalText="";interim="";seconds=0;$("timer").textContent="0:00";updWC();};
+$("clearBtn").onclick=()=>{
+  tx.value="";finalText="";interim="";seconds=0;
+  /* Сброс счётчика: иначе следующий финал не добавится. */
+  finalizedCount=0;
+  $("timer").textContent="0:00";updWC();
+};
 function updateReady(){
   const srcWords=state.sources.reduce((a,s)=>a+wc(s.text||""),0);
   const needSrc=srcWords<30;
@@ -1456,7 +1493,6 @@ function updateReady(){
     :needSrc?"Приложи учебник в шаге 2 (сканы или текст, минимум 30 слов)"
     :wc(tx.value)<10?"Расскажи или напиши пересказ (минимум 10 слов)"
     :"Всё готово — жми красную кнопку!";
-
 }
 
 function analyze(){
@@ -1954,7 +1990,6 @@ function renderResults(r,ov){
   const good=ov.good||r.good,bad=ov.bad||r.bad;
   const items=[...good.map(g=>({cls:"good",t:g})),...bad.map(b=>({cls:"",t:b}))];
   $("advice").innerHTML=items.map((x,i)=>`<li class="${x.cls}" style="animation-delay:${i*90}ms">${x.t}</li>`).join("");
-  /* тест по параграфу: показываем, только если вопросов >=5 и есть вопрос на дату И на термин */
   const hasDate=r.quiz.some(q=>q.type==="date");
   const hasTerm=r.quiz.some(q=>q.type==="term");
   const quizValid=r.quiz&&r.quiz.length>=5&&hasDate&&hasTerm;
